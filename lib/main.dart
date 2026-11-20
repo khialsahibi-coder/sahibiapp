@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -164,7 +165,7 @@ class _StudioHomeState extends State<StudioHome> {
       if (file == null) return;
       setState(() => videoLoading = true);
       await videoController?.dispose();
-      final controller = VideoPlayerController.file(file);
+      final controller = VideoPlayerController.file(File(file.path));
       await controller.initialize();
       if (!mounted) {
         await controller.dispose();
