@@ -25,6 +25,22 @@ jobs:
       - name: Generate Android platform files
         run: flutter create --platforms=android --org com.sahibi.vision --project-name sahibi_vision_ai_studio .
 
+      - name: Fix Kotlin version conflict
+        run: |
+          cat >> android/build.gradle << 'EOF'
+
+          subprojects {
+              configurations.all {
+                  resolutionStrategy {
+                      force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+                      force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'
+                      force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
+                  }
+              }
+          }
+          EOF
+          tail -15 android/build.gradle
+
       - name: Get packages
         run: flutter pub get
 
