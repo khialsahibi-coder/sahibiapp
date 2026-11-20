@@ -1,0 +1,14 @@
+BUILD THE APK FROM YOUR PHONE (GitHub Actions - free)
+
+1. Open github.com in your phone browser, sign up / log in.
+2. Create a new repository (e.g. "sahibi-vision"), set to Private or Public.
+3. Upload the CONTENTS of this folder (lib, pubspec.yaml, .github, etc).
+   Important: the hidden ".github/workflows/build-apk.yml" file must be included.
+   If the phone upload skips hidden folders, tap "Add file > Create new file",
+   type the name  .github/workflows/build-apk.yml  and paste the file contents.
+4. Go to the "Actions" tab > "Build Android APK" > "Run workflow".
+5. Wait ~5-8 minutes. Open the finished run, scroll to "Artifacts",
+   download "sahibi-vision-apk" (a zip), extract it, and tap app-release.apk.
+6. Allow "Install unknown apps" for your browser/file manager when asked.
+
+Alternative: Codemagic (codemagic.io) using the included codemagic.yaml.
