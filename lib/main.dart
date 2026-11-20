@@ -5,7 +5,6 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:record/record.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:image_picker/image_picker.dart';
 import 'package:video_player/video_player.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -37,7 +36,6 @@ class _StudioHomeState extends State<StudioHome> with SingleTickerProviderStateM
   late final TabController tabs;
   final topic = TextEditingController(), script = TextEditingController(), aiPrompt = TextEditingController();
   final tts = FlutterTts(), recorder = AudioRecorder(), voicePlayer = AudioPlayer();
-  final picker = ImagePicker();
 
   String language = 'English', status = 'Ready';
   String? voicePath, musicPath, subtitlePath;
@@ -141,11 +139,17 @@ class _StudioHomeState extends State<StudioHome> with SingleTickerProviderStateM
 
   Future<void> pickMusic() async {
     final f = await FilePicker.platform.pickFiles(type: FileType.audio, allowMultiple: false);
-    if (f?.files.single.path != null) { setState(() => musicPath = f!.files.single.path); note('Background audio selected.'); }
+    if (f != null && f.files.isNotEmpty && f.files.first.path != null) {
+      setState(() => musicPath = f.files.first.path);
+      note('Background audio selected.');
+    }
   }
   Future<void> pickSrt() async {
     final f = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['srt'], allowMultiple: false);
-    if (f?.files.single.path != null) { setState(() => subtitlePath = f!.files.single.path); note('Subtitle file selected.'); }
+    if (f != null && f.files.isNotEmpty && f.files.first.path != null) {
+      setState(() => subtitlePath = f.files.first.path);
+      note('Subtitle file selected.');
+    }
   }
 
   String buildSrt() {
@@ -179,8 +183,7 @@ class _StudioHomeState extends State<StudioHome> with SingleTickerProviderStateM
       if (clips.length == 1) {
         final input = clips.first;
         final start = (trimStart / 1000).toStringAsFixed(3);
-        final end = (trimEnd / 1000).toStringAsFixed(3);
-        final dur = ((trimEnd - trimStart).clamp(1, 1e12) / 1000).toStringAsFixed(3);
+        final dur = ((trimEnd - trimStart).clamp(1.0, 1e12) / 1000).toStringAsFixed(3);
         final args = StringBuffer('-y -ss $start -i ${q(input)} -t $dur ');
         if (musicPath != null) {
           args.write('-i ${q(musicPath!)} -filter_complex "[1:a]volume=${musicVolume.toStringAsFixed(2)}[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[a]" -map 0:v:0 -map "[a]" ');
@@ -336,7 +339,7 @@ class _StudioHomeState extends State<StudioHome> with SingleTickerProviderStateM
 
   Widget editorTab() {
     final c = preview;
-    final maxMs = videoDuration.inMilliseconds.toDouble().clamp(1, 1e12);
+    final maxMs = videoDuration.inMilliseconds.toDouble().clamp(1.0, 1e12).toDouble();
     return ListView(padding: const EdgeInsets.all(16), children: [
       heading('Video Editor & MP4 Export', 'Import one or more clips, trim a single clip, add music/subtitles and export MP4.'),
       panel(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -362,11 +365,19 @@ class _StudioHomeState extends State<StudioHome> with SingleTickerProviderStateM
             Expanded(child: VideoProgressIndicator(c, allowScrubbing: true, colors: const VideoProgressColors(playedColor: teal, bufferedColor: Colors.white30, backgroundColor: Colors.white12)))
           ]),
           Text('Trim start: ${(trimStart/1000).toStringAsFixed(1)} sec'),
-          Slider(value: trimStart.clamp(0, (trimEnd - 500).clamp(0, maxMs)), min: 0, max: maxMs,
-            onChanged: (v) => setState(() { trimStart = v.clamp(0, trimEnd - 500); })),
+          Slider(
+            value: trimStart.clamp(0.0, (trimEnd - 500).clamp(0.0, maxMs)).toDouble(),
+            min: 0,
+            max: maxMs,
+            onChanged: (v) => setState(() { trimStart = v.clamp(0.0, trimEnd - 500).toDouble(); }),
+          ),
           Text('Trim end: ${(trimEnd/1000).toStringAsFixed(1)} sec'),
-          Slider(value: trimEnd.clamp((trimStart + 500).clamp(1, maxMs), maxMs), min: 1, max: maxMs,
-            onChanged: (v) => setState(() { trimEnd = v.clamp(trimStart + 500, maxMs); })),
+          Slider(
+            value: trimEnd.clamp((trimStart + 500).clamp(1.0, maxMs), maxMs).toDouble(),
+            min: 1,
+            max: maxMs,
+            onChanged: (v) => setState(() { trimEnd = v.clamp(trimStart + 500, maxMs).toDouble(); }),
+          ),
         ],
       ])),
       const SizedBox(height: 10),
