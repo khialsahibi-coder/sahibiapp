@@ -25,11 +25,8 @@ jobs:
       - name: Generate Android platform files
         run: flutter create --platforms=android --org com.sahibi.vision --project-name sahibi_vision_ai_studio .
 
-      - name: Fix Android SDK and Kotlin settings
+      - name: Fix Kotlin version conflict
         run: |
-          sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' android/app/build.gradle
-          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' android/app/build.gradle
-          echo "android.suppressUnsupportedCompileSdk=36" >> android/gradle.properties
           cat >> android/build.gradle << 'EOF'
 
           subprojects {
@@ -42,7 +39,7 @@ jobs:
               }
           }
           EOF
-          grep -n "compileSdk\|minSdk" android/app/build.gradle
+          tail -15 android/build.gradle
 
       - name: Get packages
         run: flutter pub get
