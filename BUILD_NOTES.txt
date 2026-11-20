@@ -1,2 +1,0 @@
-Build environment check:
-This delivery environment does not have Flutter, Dart, or Android SDK configured. Therefore an APK could not be compiled or tested here. The ZIP contains the Flutter source starter and build instructions, not an installable APK.
