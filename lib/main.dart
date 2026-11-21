@@ -18,7 +18,7 @@ import 'package:speech_to_text/speech_to_text.dart';
 import 'package:video_player/video_player.dart';
 
 // ---------------------------------------------------------------------------
-// SAHIBI VISION AI STUDIO  -  version 1.0
+// SAHIBI VISION AI STUDIO  -  upgraded local workflow
 // ---------------------------------------------------------------------------
 
 const navy = Color(0xFF071A31);
@@ -129,7 +129,7 @@ class Scene {
 // ---------------------------------------------------------------------------
 
 class AppState extends ChangeNotifier {
-  String language = 'English';
+  String language = 'Dari';
   final TextEditingController topic =
       TextEditingController(text: 'Never lose hope in Allah');
   final TextEditingController script = TextEditingController();
@@ -2216,11 +2216,11 @@ class _AiVideoPageState extends State<AiVideoPage> {
     try {
       if (useAiVoice) {
         final all = app.scenes.map((s) => s.text).join(' ');
-        final p = await synthesizeVoice(all, language: app.language);
+        final p = await synthesizeVoice(all, language: app.language, rate: 0.38, pitch: 0.82);
         if (p != null) {
           await useVoice(p, 'AI voice (${app.language}) — storyboard');
         } else if (mounted) {
-          toast(context, 'AI voice file could not be created: $lastTtsError  Scenes will use estimated timing.');
+          toast(context, 'Dari/system voice could not be created: $lastTtsError. Select a working voice in Voice Studio or use your own recording.');
         }
       }
       final n = app.scenes.length;
@@ -2251,7 +2251,16 @@ class _AiVideoPageState extends State<AiVideoPage> {
       app.transition = 'fade';
       app.transitionLen = td;
       app.cropToFill = true;
-      app.burnCaptions = false;
+      // Create one timed caption per scene and burn captions into the MP4.
+      // Caption timing follows the generated scene timeline; review it before publishing.
+      app.captions.clear();
+      var captionStart = 0.0;
+      for (var i = 0; i < n; i++) {
+        final captionEnd = captionStart + lens[i];
+        app.captions.add(Caption(captionStart, captionEnd, app.scenes[i].text));
+        captionStart = captionEnd - (i < n - 1 ? td : 0.0);
+      }
+      app.burnCaptions = true;
       app.changed();
       if (!mounted) return;
       setState(() {
@@ -2290,29 +2299,29 @@ class _AiVideoPageState extends State<AiVideoPage> {
               Icon(Icons.check_circle, color: teal, size: 18),
               SizedBox(width: 8),
               Expanded(
-                child: Text('TEMPLATE-BASED creation (available now)',
+                child: Text('FREE LOCAL VIDEO ASSEMBLY (available now)',
                     style: TextStyle(color: teal, fontWeight: FontWeight.bold)),
               ),
             ]),
             SizedBox(height: 4),
-            Note('Splits your script into scenes, draws designed scene cards (gradient or your own picture + text), adds a voiceover, and joins them with transitions.'),
+            Note('Splits your script into scenes, creates visual cards or uses your selected pictures, adds phone-generated narration, creates timed captions, and exports an MP4. This is automated editing, not AI-generated moving footage.'),
             SizedBox(height: 10),
             Row(children: [
               Icon(Icons.block, color: Colors.orangeAccent, size: 18),
               SizedBox(width: 8),
               Expanded(
-                child: Text('GENERATIVE AI VIDEO (not included)',
+                child: Text('GENERATIVE AI FOOTAGE (not included)',
                     style: TextStyle(color: Colors.orangeAccent, fontWeight: FontWeight.bold)),
               ),
             ]),
             SizedBox(height: 4),
-            Note('Creating brand-new footage from a text prompt needs an external AI video service (online, usually paid) or a very large model. This app does not do that. Each scene below has a ready prompt you can copy into such a tool, then import the clip in the Video Editor.'),
+            Note('Brand-new moving footage from a prompt requires an external AI video service or a large local model. No paid service is called by this build. Scene prompts can be copied into a provider manually, then its clips imported into Video Editor.'),
           ]),
         ),
         const SizedBox(height: 14),
         Panel(
           title: '1. Storyboard',
-          subtitle: 'Built from your Script Studio text (or a starter script if empty).',
+          subtitle: 'Built from your Script Studio text. For about five minutes of narration, prepare roughly 600–700 words; actual duration depends on the installed voice and speaking speed.',
           icon: Icons.view_carousel,
           child: Column(children: [
             const LangDropdown(),
