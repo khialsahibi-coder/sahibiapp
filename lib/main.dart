@@ -11,7 +11,7 @@ import 'package:ffmpeg_kit_flutter_new/return_code.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_tts/flutter_tts.dart';
+import 'package:gal/gal.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:share_plus/share_plus.dart';
@@ -162,7 +162,7 @@ class AppState extends ChangeNotifier {
 
   String transition = 'none';
   double transitionLen = 0.5;
-  bool cropToFill = true;
+  String framing = 'blur'; // blur | fit | crop
   bool burnCaptions = true;
   String? lastExport;
 
@@ -182,9 +182,7 @@ class AppState extends ChangeNotifier {
 }
 
 final AppState app = AppState();
-final FlutterTts tts = FlutterTts();
 final AudioPlayer audio = AudioPlayer();
-String lastTtsError = '';
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -281,44 +279,6 @@ Future<String?> makeThumb(String video) async {
     if (ReturnCode.isSuccess(rc) && File(out).existsSync()) return out;
   } catch (_) {}
   return null;
-}
-
-/// AI voice: Android neural/system text-to-speech saved to a WAV file.
-Future<String?> synthesizeVoice(
-  String text, {
-  required String language,
-  double rate = 0.45,
-  double pitch = 1.0,
-  Map<String, String>? voice,
-}) async {
-  lastTtsError = '';
-  try {
-    final dir = await getExternalStorageDirectory();
-    if (dir == null) {
-      lastTtsError = 'No storage folder available.';
-      return null;
-    }
-    final name = 'voice_${ts()}.wav';
-    await tts.stop();
-    await tts.setLanguage(langLocales[language]!);
-    await tts.setSpeechRate(rate);
-    await tts.setPitch(pitch);
-    if (voice != null) await tts.setVoice(voice);
-    await tts.awaitSynthCompletion(true);
-    final r = await tts.synthesizeToFile(text, name);
-    final path = '${dir.path}/$name';
-    for (var i = 0; i < 20; i++) {
-      final f = File(path);
-      if (f.existsSync() && f.lengthSync() > 2000) return path;
-      await Future.delayed(const Duration(milliseconds: 300));
-    }
-    lastTtsError = 'The speech engine returned $r but no audio file was written. '
-        'Check that a voice for $language is installed.';
-    return null;
-  } catch (e) {
-    lastTtsError = '$e';
-    return null;
-  }
 }
 
 Future<void> useVoice(String path, String label) async {
@@ -852,14 +812,22 @@ Future<ExportResult> runExport(void Function(double) onProgress) async {
   }
 
   final parts = <String>[];
-  final fit = app.cropToFill
+  final fit = app.framing == 'crop'
       ? 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920'
       : 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black';
   for (var i = 0; i < n; i++) {
     final hold = clips[i].hold > 0.05
         ? ',tpad=stop_mode=clone:stop_duration=${_f(clips[i].hold)}'
         : '';
-    parts.add('[$i:v]$fit,setsar=1,fps=30$hold,format=yuv420p[v$i]');
+    if (app.framing == 'blur') {
+      // whole picture in the middle, a blurred enlarged copy behind it (nothing is cropped)
+      parts.add('[$i:v]split=2[bg$i][fg$i]');
+      parts.add('[bg$i]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,boxblur=8:2,scale=1080:1920,setsar=1[bb$i]');
+      parts.add('[fg$i]scale=1080:1920:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[ff$i]');
+      parts.add('[bb$i][ff$i]overlay=(W-w)/2:(H-h)/2,setsar=1,fps=30$hold,format=yuv420p[v$i]');
+    } else {
+      parts.add('[$i:v]$fit,setsar=1,fps=30$hold,format=yuv420p[v$i]');
+    }
   }
 
   var cur = 'v0';
@@ -1060,8 +1028,7 @@ class HomePage extends StatelessWidget {
   Widget build(BuildContext context) {
     final modules = <_Module>[
       _Module('Script Studio', 'English • Dari • Pashto', Icons.edit_note, () => const ScriptPage()),
-      _Module('AI Voice', 'Text to speech & voiceover file', Icons.record_voice_over, () => const VoicePage(initialTab: 0)),
-      _Module('My Voice', 'Record • replay • save', Icons.mic, () => const VoicePage(initialTab: 1)),
+      _Module('My Voice', 'Record • replay • save', Icons.mic, () => const VoicePage()),
       _Module('Subtitle Studio', 'Auto captions • edit • SRT', Icons.subtitles, () => const SubtitlePage()),
       _Module('Video Editor', 'Clips • trim • text • music', Icons.video_library, () => const EditorPage()),
       _Module('AI Video', 'Storyboard & scenes', Icons.auto_awesome, () => const AiVideoPage()),
@@ -1243,31 +1210,16 @@ class ScriptPage extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// 2 & 3. Voice: AI voice + personal recording
+// 2. My Voice: record, replay, save and use in videos
 // ---------------------------------------------------------------------------
 
 class VoicePage extends StatelessWidget {
-  const VoicePage({super.key, this.initialTab = 0});
-  final int initialTab;
+  const VoicePage({super.key});
 
   @override
-  Widget build(BuildContext context) => DefaultTabController(
-        length: 2,
-        initialIndex: initialTab,
-        child: Scaffold(
-          appBar: AppBar(
-            title: const Text('Voice Studio'),
-            bottom: const TabBar(
-              indicatorColor: gold,
-              labelColor: gold,
-              tabs: [
-                Tab(icon: Icon(Icons.record_voice_over), text: 'AI Voice'),
-                Tab(icon: Icon(Icons.mic), text: 'My Voice'),
-              ],
-            ),
-          ),
-          body: const TabBarView(children: [_AiVoiceTab(), _MyVoiceTab()]),
-        ),
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('My Voice')),
+        body: const _MyVoiceTab(),
       );
 }
 
@@ -1301,170 +1253,6 @@ Widget currentVoiceBanner() => Container(
           ),
       ]),
     );
-
-class _AiVoiceTab extends StatefulWidget {
-  const _AiVoiceTab();
-  @override
-  State<_AiVoiceTab> createState() => _AiVoiceTabState();
-}
-
-class _AiVoiceTabState extends State<_AiVoiceTab> {
-  double rate = 0.45;
-  double pitch = 1.0;
-  bool busy = false;
-  bool? langOk;
-  List<Map<String, String>> voices = [];
-  String? voiceName;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadVoices();
-  }
-
-  @override
-  void dispose() {
-    tts.stop();
-    super.dispose();
-  }
-
-  Map<String, String>? get selectedVoice {
-    for (final v in voices) {
-      if (v['name'] == voiceName) return v;
-    }
-    return null;
-  }
-
-  Future<void> _loadVoices() async {
-    try {
-      final raw = await tts.getVoices;
-      final all = <Map<String, String>>[];
-      if (raw is List) {
-        for (final v in raw) {
-          if (v is Map) all.add({'name': '${v['name']}', 'locale': '${v['locale']}'});
-        }
-      }
-      final prefix = langPrefix[app.language]!;
-      voices = all.where((v) => v['locale']!.toLowerCase().startsWith(prefix)).toList()
-        ..sort((a, b) => a['name']!.compareTo(b['name']!));
-      voiceName = null;
-      final ok = await tts.isLanguageAvailable(langLocales[app.language]!);
-      langOk = ok == true || ok == 1;
-    } catch (_) {
-      langOk = null;
-    }
-    if (mounted) setState(() {});
-  }
-
-  Future<void> _preview() async {
-    final text = currentScript();
-    try {
-      await tts.stop();
-      await tts.setLanguage(langLocales[app.language]!);
-      await tts.setSpeechRate(rate);
-      await tts.setPitch(pitch);
-      final v = selectedVoice;
-      if (v != null) await tts.setVoice(v);
-      await tts.speak(text);
-    } catch (_) {
-      if (mounted) toast(context, 'This voice is unavailable. Check Android Text-to-speech settings.');
-    }
-  }
-
-  Future<void> _generate() async {
-    setState(() => busy = true);
-    final path = await synthesizeVoice(currentScript(),
-        language: app.language, rate: rate, pitch: pitch, voice: selectedVoice);
-    if (path != null) {
-      await useVoice(path, 'AI voice (${app.language})');
-      if (mounted) toast(context, 'Voiceover created and selected for your video.');
-    } else if (mounted) {
-      toast(context, 'Could not create the voice file. $lastTtsError');
-    }
-    if (mounted) setState(() => busy = false);
-  }
-
-  @override
-  Widget build(BuildContext context) => ListenableBuilder(
-        listenable: app,
-        builder: (context, _) => ListView(padding: const EdgeInsets.all(16), children: [
-          currentVoiceBanner(),
-          const SizedBox(height: 14),
-          Panel(
-            title: 'AI Voice generation',
-            subtitle: 'Turns your script into speech using the voices installed on your phone.',
-            icon: Icons.record_voice_over,
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              LangDropdown(onChanged: (_) => _loadVoices()),
-              if (langOk == false)
-                const Padding(
-                  padding: EdgeInsets.only(top: 8),
-                  child: Note(
-                      'No voice data for this language was reported. Open Android Settings → Text-to-speech output and install the voice, or try English first.',
-                      color: Colors.orangeAccent),
-                ),
-              const SizedBox(height: 10),
-              DropdownButtonFormField<String>(
-                value: voiceName,
-                isExpanded: true,
-                decoration: const InputDecoration(labelText: 'Voice (optional)'),
-                items: [
-                  for (final v in voices)
-                    DropdownMenuItem(value: v['name']!, child: Text('${v['name']} (${v['locale']})', overflow: TextOverflow.ellipsis)),
-                ],
-                onChanged: (v) => setState(() => voiceName = v),
-              ),
-              Row(children: [
-                const SizedBox(width: 62, child: Text('Speed')),
-                Expanded(
-                  child: Slider(value: rate, min: 0.25, max: 0.7, onChanged: (v) => setState(() => rate = v)),
-                ),
-                Text(rate.toStringAsFixed(2)),
-              ]),
-              Row(children: [
-                const SizedBox(width: 62, child: Text('Pitch')),
-                Expanded(
-                  child: Slider(value: pitch, min: 0.6, max: 1.4, onChanged: (v) => setState(() => pitch = v)),
-                ),
-                Text(pitch.toStringAsFixed(2)),
-              ]),
-              Row(children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _preview,
-                    icon: const Icon(Icons.play_arrow),
-                    label: const Text('Preview'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: () => tts.stop(),
-                    icon: const Icon(Icons.stop),
-                    label: const Text('Stop'),
-                  ),
-                ),
-              ]),
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  style: FilledButton.styleFrom(backgroundColor: gold, foregroundColor: navy),
-                  onPressed: busy ? null : _generate,
-                  icon: busy
-                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.audiotrack),
-                  label: Text(busy ? 'Creating voiceover...' : 'Create voiceover file for video'),
-                ),
-              ),
-              const SizedBox(height: 8),
-              const Note(
-                  'This is your phone\'s built-in text-to-speech (neural voices when the engine provides them). It is not voice cloning. Dari uses Persian (fa-IR) voices, and Pashto voices are often not installed.'),
-            ]),
-          ),
-        ]),
-      );
-}
 
 class _MyVoiceTab extends StatefulWidget {
   const _MyVoiceTab();
@@ -2360,13 +2148,18 @@ class _EditorPageState extends State<EditorPage> {
                 ),
                 Text('${app.transitionLen.toStringAsFixed(1)} s'),
               ]),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Fill the 9:16 screen (crop)'),
-              subtitle: const Text('Off = keep whole picture with black bars.'),
-              value: app.cropToFill,
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              value: app.framing,
+              isExpanded: true,
+              decoration: const InputDecoration(labelText: 'Framing on the 9:16 screen'),
+              items: const [
+                DropdownMenuItem(value: 'blur', child: Text('Whole video + blurred background')),
+                DropdownMenuItem(value: 'fit', child: Text('Whole video + black bars')),
+                DropdownMenuItem(value: 'crop', child: Text('Fill screen (crops the edges)')),
+              ],
               onChanged: (v) {
-                app.cropToFill = v;
+                app.framing = v ?? 'blur';
                 app.changed();
               },
             ),
@@ -2481,7 +2274,6 @@ class AiVideoPage extends StatefulWidget {
 
 class _AiVideoPageState extends State<AiVideoPage> {
   bool busy = false;
-  bool useAiVoice = true;
   String stage = '';
 
   int? genIndex;
@@ -2596,18 +2388,9 @@ class _AiVideoPageState extends State<AiVideoPage> {
     }
     setState(() {
       busy = true;
-      stage = 'Preparing voiceover...';
+      stage = 'Preparing scenes...';
     });
     try {
-      if (useAiVoice) {
-        final all = app.scenes.map((s) => s.text).join(' ');
-        final p = await synthesizeVoice(all, language: app.language, rate: 0.38, pitch: 0.82);
-        if (p != null) {
-          await useVoice(p, 'AI voice (${app.language}) — storyboard');
-        } else if (mounted) {
-          toast(context, 'Dari/system voice could not be created: $lastTtsError. Select a working voice in Voice Studio or use your own recording.');
-        }
-      }
       final n = app.scenes.length;
       const td = 0.6;
       final hasVoice = app.voicePath != null && app.voiceDuration > 0;
@@ -2643,7 +2426,7 @@ class _AiVideoPageState extends State<AiVideoPage> {
       }
       app.transition = 'fade';
       app.transitionLen = td;
-      app.cropToFill = true;
+      app.framing = 'blur';
       // Create one timed caption per scene and burn captions into the MP4.
       // Caption timing follows the generated scene timeline; review it before publishing.
       app.captions.clear();
@@ -2700,7 +2483,7 @@ class _AiVideoPageState extends State<AiVideoPage> {
               ),
             ]),
             SizedBox(height: 4),
-            Note('Splits your script into scenes, creates visual cards or uses your selected pictures, adds phone-generated narration, creates timed captions, and exports an MP4. Without AI clips this is automated editing, not AI-generated footage.'),
+            Note('Splits your script into scenes, creates visual cards or uses your selected pictures, adds your recorded voiceover, creates timed captions, and exports an MP4. Without AI clips this is automated editing, not AI-generated footage.'),
             SizedBox(height: 10),
             Row(children: [
               Icon(Icons.cloud, color: Colors.orangeAccent, size: 18),
@@ -2817,13 +2600,9 @@ class _AiVideoPageState extends State<AiVideoPage> {
             title: '2. Build the video',
             icon: Icons.movie_creation,
             child: Column(children: [
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Create a new AI voiceover from the scenes'),
-                subtitle: const Text('Off = use the voice already selected in Voice Studio.'),
-                value: useAiVoice,
-                onChanged: (v) => setState(() => useAiVoice = v),
-              ),
+              const Note(
+                  'Narration: record your own voice first in My Voice (or import audio). Scene timing follows your recording; without one, timing is estimated from the text length.'),
+              const SizedBox(height: 8),
               if (busy) ...[
                 const LinearProgressIndicator(),
                 const SizedBox(height: 6),
@@ -2982,6 +2761,57 @@ class _ExportPageState extends State<ExportPage> {
   String? resultPath;
   VideoPlayerController? player;
   final Stopwatch sw = Stopwatch();
+  bool savedToGallery = false;
+
+  Future<void> _saveToGallery() async {
+    final p = resultPath;
+    if (p == null) return;
+    try {
+      await Gal.putVideo(p, album: 'Sahibi Vision');
+      if (!mounted) return;
+      setState(() => savedToGallery = true);
+      toast(context, 'Saved to your Gallery (album "Sahibi Vision").');
+    } catch (e) {
+      if (mounted) {
+        toast(context, 'Could not save to the Gallery: $e  — allow photo/video access for the app in Android Settings and try again.');
+      }
+    }
+  }
+
+  Future<void> _deleteExport() async {
+    final p = resultPath;
+    if (p == null) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete this export?'),
+        content: Text(savedToGallery
+            ? 'This removes the copy inside the app. The copy you saved to the Gallery stays there — delete it from the Gallery app if you no longer want it.'
+            : 'The exported video will be permanently deleted.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await player?.dispose();
+    player = null;
+    try {
+      await File(p).delete();
+    } catch (_) {}
+    if (app.lastExport == p) {
+      app.lastExport = null;
+      app.changed();
+    }
+    if (!mounted) return;
+    setState(() {
+      resultPath = null;
+      savedToGallery = false;
+      progress = 0;
+    });
+    toast(context, 'Export deleted.');
+  }
 
   @override
   void initState() {
@@ -3006,6 +2836,7 @@ class _ExportPageState extends State<ExportPage> {
       progress = 0;
       error = null;
       resultPath = null;
+      savedToGallery = false;
     });
     sw
       ..reset()
@@ -3135,17 +2966,37 @@ class _ExportPageState extends State<ExportPage> {
               ]),
             ],
             Text('Saved in the app: ${resultPath!.split('/').last}', style: const TextStyle(fontSize: 12.5, color: Colors.white70)),
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
             SizedBox(
               width: double.infinity,
               child: FilledButton.icon(
-                onPressed: () => Share.shareXFiles([XFile(resultPath!)], text: 'Made with Sahibi Vision AI Studio'),
-                icon: const Icon(Icons.ios_share),
-                label: const Text('Share / save to phone'),
+                style: FilledButton.styleFrom(backgroundColor: gold, foregroundColor: navy),
+                onPressed: _saveToGallery,
+                icon: Icon(savedToGallery ? Icons.check_circle : Icons.save_alt),
+                label: Text(savedToGallery ? 'Saved to Gallery (tap to save again)' : 'Save to Gallery'),
               ),
             ),
-            const SizedBox(height: 6),
-            const Note('Tap Share, then choose "Save to device"/Files/Drive, or send it straight to WhatsApp, Telegram or social apps.'),
+            const SizedBox(height: 8),
+            Row(children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => Share.shareXFiles([XFile(resultPath!)], text: 'Made with Sahibi Vision AI Studio'),
+                  icon: const Icon(Icons.ios_share),
+                  label: const Text('Share'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(foregroundColor: Colors.redAccent),
+                  onPressed: _deleteExport,
+                  icon: const Icon(Icons.delete_outline),
+                  label: const Text('Delete'),
+                ),
+              ),
+            ]),
+            const SizedBox(height: 8),
+            const Note('Save to Gallery puts a normal copy in your phone Gallery. Share sends the file to WhatsApp, Telegram, Drive and other apps. Delete removes the copy inside this app only.'),
           ]),
         ),
     ];
