@@ -31,22 +31,6 @@ const langLocales = {'English': 'en-US', 'Dari': 'fa-IR', 'Pashto': 'ps-AF'};
 const sttLocales = {'English': 'en_US', 'Dari': 'fa_IR', 'Pashto': 'ps_AF'};
 const langPrefix = {'English': 'en', 'Dari': 'fa', 'Pashto': 'ps'};
 
-const templates = <String, Map<String, String>>{
-  'English': {
-    'opening': 'Sometimes life becomes difficult, and you may feel like giving up.',
-    'middle': 'Keep praying, keep trusting Allah, and keep moving forward. Your difficult days do not define your future.',
-    'ending': 'Be patient, be grateful, and never lose hope. Sahibi Vision — faith, knowledge and inspiration.'
-  },
-  'Dari': {
-    'opening': 'گاهی زندگی دشوار می‌شود و انسان احساس می‌کند که دیگر توان ادامه دادن ندارد.',
-    'middle': 'به دعا کردن ادامه بده، به الله توکل کن و با امید به راهت ادامه بده. روزهای سخت، آیندهٔ تو را تعیین نمی‌کنند.',
-    'ending': 'صبر داشته باش، شکرگزار باش و هرگز ناامید نشو. صاحبی ویژن؛ ایمان، دانش و الهام.'
-  },
-  'Pashto': {
-    'opening': 'کله کله ژوند ستونزمن شي او انسان داسې احساس وکړي چې نور د دوام توان نه لري.',
-    'middle': 'دعا ته دوام ورکړه، پر الله توکل وکړه او په هيله خپل سفر ته دوام ورکړه. سختې ورځې ستا راتلونکی نه ټاکي.',
-    'ending': 'صبر وکړه، شکر وباسه او هېڅکله هيله مه بایله. صاحبي ویژن؛ ایمان، پوهه او الهام.'
-  },
 };
 
 const sceneThemes = <List<Color>>[
@@ -139,7 +123,7 @@ class Scene {
 class AppState extends ChangeNotifier {
   String language = 'Dari';
   final TextEditingController topic =
-      TextEditingController(text: 'Never lose hope in Allah');
+      TextEditingController(text: 'you can add');
   final TextEditingController script = TextEditingController();
   final TextEditingController genSpace =
       TextEditingController(text: 'Lightricks/ltx-video-distilled');
@@ -2152,7 +2136,7 @@ class _EditorPageState extends State<EditorPage> {
             DropdownButtonFormField<String>(
               value: app.framing,
               isExpanded: true,
-              decoration: const InputDecoration(labelText: 'Framing on the 9:16 screen'),
+              decoration: const InputDecoration(labelText: 'Framing on the 16:9 screen'),
               items: const [
                 DropdownMenuItem(value: 'blur', child: Text('Whole video + blurred background')),
                 DropdownMenuItem(value: 'fit', child: Text('Whole video + black bars')),
@@ -2366,7 +2350,7 @@ class _AiVideoPageState extends State<AiVideoPage> {
       app.scenes.add(Scene(
         text: texts[i],
         theme: i % sceneThemes.length,
-        prompt: 'Vertical 9:16 cinematic shot, ${visualIdeas[i % visualIdeas.length]}. '
+        prompt: 'Vertical 16:9 cinematic shot, ${visualIdeas[i % visualIdeas.length]}. '
             'Theme: $topic. Respectful, calm, no text, no faces.',
       ));
     }
@@ -2554,7 +2538,7 @@ class _AiVideoPageState extends State<AiVideoPage> {
               ]),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('Portrait (9:16) when the Space allows'),
+                title: const Text('Portrait (16:9) when the Space allows'),
                 value: genPortrait,
                 onChanged: (v) => setState(() => genPortrait = v),
               ),
@@ -2876,7 +2860,7 @@ class _ExportPageState extends State<ExportPage> {
         title: 'Export settings',
         icon: Icons.high_quality,
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('1080 × 1920 (vertical 9:16) • 30 fps • H.264 + AAC MP4'),
+          const Text('1080 × 1920 (vertical 16:9) • 30 fps • H.264 + AAC MP4'),
           const SizedBox(height: 8),
           Text('Timeline: ${app.clips.length} items • ${fmtDur(app.timelineLength)}'),
           Text('Voiceover: ${app.voiceLabel}'),
