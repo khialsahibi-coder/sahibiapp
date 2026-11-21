@@ -1,29 +1,27 @@
 name: sahibi_vision_ai_studio
-description: SAHIBI VISION AI STUDIO - local video editor with online AI video workflow.
-publish_to: none
-version: 2.0.0+2
+description: Sahibi Vision AI Studio - script, voice, subtitles, video editing and 1080p export for Android.
+publish_to: 'none'
+version: 1.0.0+3
 
 environment:
-  sdk: ">=3.3.0 <4.0.0"
+  sdk: '>=3.3.0 <4.0.0'
 
 dependencies:
   flutter:
     sdk: flutter
   flutter_tts: ^4.2.2
-  record: ^6.0.0
+  record: ^5.2.0
   audioplayers: ^6.1.0
-  path_provider: ^2.1.5
-  image_picker: ^1.1.2
-  video_player: ^2.9.2
-  file_picker: ^8.1.7
-  ffmpeg_kit_flutter_new: ^4.7.2
-  url_launcher: ^6.3.1
+  speech_to_text: ^7.0.0
+  file_picker: ^8.1.4
   share_plus: ^10.1.4
+  path_provider: ^2.1.5
+  video_player: ^2.9.2
+  ffmpeg_kit_flutter_new: ^4.4.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^5.0.0
 
 flutter:
   uses-material-design: true
