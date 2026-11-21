@@ -2136,7 +2136,7 @@ class _EditorPageState extends State<EditorPage> {
             DropdownButtonFormField<String>(
               value: app.framing,
               isExpanded: true,
-              decoration: const InputDecoration(labelText: 'Framing on the 16:9 screen'),
+              decoration: const InputDecoration(labelText: 'Framing on the 9:16 screen'),
               items: const [
                 DropdownMenuItem(value: 'blur', child: Text('Whole video + blurred background')),
                 DropdownMenuItem(value: 'fit', child: Text('Whole video + black bars')),
@@ -2350,7 +2350,7 @@ class _AiVideoPageState extends State<AiVideoPage> {
       app.scenes.add(Scene(
         text: texts[i],
         theme: i % sceneThemes.length,
-        prompt: 'Vertical 16:9 cinematic shot, ${visualIdeas[i % visualIdeas.length]}. '
+        prompt: 'Horizontal 16:9 cinematic shot, ${visualIdeas[i % visualIdeas.length]}. '
             'Theme: $topic. Respectful, calm, no text, no faces.',
       ));
     }
@@ -2538,7 +2538,7 @@ class _AiVideoPageState extends State<AiVideoPage> {
               ]),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('Portrait (16:9) when the Space allows'),
+                title: const Text('Portrait (9:16) when the Space allows'),
                 value: genPortrait,
                 onChanged: (v) => setState(() => genPortrait = v),
               ),
@@ -2860,7 +2860,7 @@ class _ExportPageState extends State<ExportPage> {
         title: 'Export settings',
         icon: Icons.high_quality,
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('1080 × 1920 (vertical 16:9) • 30 fps • H.264 + AAC MP4'),
+          const Text('1080 × 1920 (horizontal 16:9) • 30 fps • H.264 + AAC MP4'),
           const SizedBox(height: 8),
           Text('Timeline: ${app.clips.length} items • ${fmtDur(app.timelineLength)}'),
           Text('Voiceover: ${app.voiceLabel}'),
