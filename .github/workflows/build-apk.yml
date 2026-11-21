@@ -22,11 +22,65 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Check source files
+        run: |
+          if [ ! -f lib/main.dart ]; then echo "ERROR: lib/main.dart is missing."; exit 1; fi
+          if ! grep -q "SahibiVisionApp" lib/main.dart; then echo "ERROR: lib/main.dart is not the Sahibi Vision file."; exit 1; fi
+          if ! grep -q "ffmpeg_kit_flutter_new" pubspec.yaml; then echo "ERROR: pubspec.yaml is the old version."; exit 1; fi
+          cp lib/main.dart /tmp/main.dart.bak
+          cp pubspec.yaml /tmp/pubspec.yaml.bak
+
       - name: Generate Android platform files
         run: flutter create --platforms=android --org com.sahibi.vision --project-name sahibi_vision_ai_studio .
 
-      - name: Fix Kotlin version conflict
+      - name: Restore app code
         run: |
+          cp /tmp/main.dart.bak lib/main.dart
+          cp /tmp/pubspec.yaml.bak pubspec.yaml
+          grep -c "SahibiVisionApp" lib/main.dart
+
+      - name: Configure Android project
+        run: |
+          sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 36/' android/app/build.gradle
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' android/app/build.gradle
+          sed -i 's/signingConfig = signingConfigs.debug/signingConfig = signingConfigs.debug\n            minifyEnabled false\n            shrinkResources false/' android/app/build.gradle
+          echo "android.suppressUnsupportedCompileSdk=36" >> android/gradle.properties
+          python3 - <<'PY'
+          p = 'android/app/src/main/AndroidManifest.xml'
+          s = open(p).read()
+          perms = (
+              '    <uses-permission android:name="android.permission.RECORD_AUDIO"/>\n'
+              '    <uses-permission android:name="android.permission.INTERNET"/>\n'
+              '    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>\n'
+          )
+          if 'RECORD_AUDIO' not in s:
+              s = s.replace('<application', perms + '    <application', 1)
+          intent = '<intent><action android:name="android.speech.RecognitionService"/></intent>'
+          if 'RecognitionService' not in s:
+              if '</queries>' in s:
+                  s = s.replace('</queries>', '    ' + intent + '\n    </queries>', 1)
+              else:
+                  s = s.replace('</manifest>', '    <queries>' + intent + '</queries>\n</manifest>', 1)
+          open(p, 'w').write(s)
+          PY
+          sed -i -E 's/(org\.jetbrains\.kotlin\.android" version ")[0-9.]+/\12.1.0/' android/settings.gradle
+          grep -n "kotlin" android/settings.gradle || true
+          grep -n "compileSdk\|minSdk\|minify" android/app/build.gradle || true
+          grep -n "RECORD_AUDIO\|RecognitionService" android/app/src/main/AndroidManifest.xml || true
+
+      - name: Get packages
+        run: flutter pub get
+
+      - name: Build release APK (Kotlin 2.1)
+        id: primary
+        continue-on-error: true
+        run: flutter build apk --release --target-platform android-arm64
+
+      - name: Build release APK (fallback settings)
+        id: fallback
+        if: steps.primary.outcome == 'failure'
+        run: |
+          sed -i -E 's/(org\.jetbrains\.kotlin\.android" version ")[0-9.]+/\11.8.22/' android/settings.gradle
           cat >> android/build.gradle << 'EOF'
 
           subprojects {
@@ -39,15 +93,10 @@ jobs:
               }
           }
           EOF
-          tail -15 android/build.gradle
-
-      - name: Get packages
-        run: flutter pub get
-
-      - name: Build release APK
-        run: flutter build apk --release
+          flutter build apk --release --target-platform android-arm64
 
       - name: Upload APK
+        if: steps.primary.outcome == 'success' || steps.fallback.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: sahibi-vision-apk
