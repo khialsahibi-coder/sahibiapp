@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -18,7 +19,7 @@ import 'package:speech_to_text/speech_to_text.dart';
 import 'package:video_player/video_player.dart';
 
 // ---------------------------------------------------------------------------
-// SAHIBI VISION AI STUDIO  -  upgraded local workflow
+// SAHIBI VISION AI STUDIO  -  upgraded local workflow + generative clips
 // ---------------------------------------------------------------------------
 
 const navy = Color(0xFF071A31);
@@ -88,7 +89,11 @@ class MediaClip {
   double start;
   double end;
 
-  double get length => end - start;
+  /// Extra seconds the last frame is held (used when an AI clip is shorter than its scene).
+  double hold = 0;
+
+  double get playLength => end - start;
+  double get length => end - start + hold;
   String get name => path.split('/').last;
 }
 
@@ -118,6 +123,9 @@ class TextLayer {
 
 class Scene {
   Scene({required this.text, this.theme = 0, this.prompt = '', this.imagePath});
+  String? videoPath;
+  double videoDuration = 0;
+  String? thumb;
   String text;
   int theme;
   String prompt;
@@ -133,6 +141,10 @@ class AppState extends ChangeNotifier {
   final TextEditingController topic =
       TextEditingController(text: 'Never lose hope in Allah');
   final TextEditingController script = TextEditingController();
+  final TextEditingController genSpace =
+      TextEditingController(text: 'Lightricks/ltx-video-distilled');
+  final TextEditingController genToken = TextEditingController();
+  final TextEditingController genEndpoint = TextEditingController();
 
   String? voicePath;
   String voiceLabel = 'None selected';
@@ -451,6 +463,314 @@ Future<String> renderSceneCard(Scene s, String outPath) async {
 // 1080p export engine (FFmpeg)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Generative AI footage via an open-model Gradio Space (Hugging Face)
+// ---------------------------------------------------------------------------
+
+class GenResult {
+  GenResult({this.path, this.error});
+  final String? path;
+  final String? error;
+}
+
+String spaceBaseUrl(String input) {
+  final s = input.trim();
+  if (s.isEmpty) return '';
+  String clean(String x) => x.toLowerCase().replaceAll('_', '-').replaceAll('.', '-');
+  final hf = RegExp(r'huggingface\.co/spaces/([\w.-]+)/([\w.-]+)').firstMatch(s);
+  final plain = RegExp(r'^([\w.-]+)/([\w.-]+)$').firstMatch(s);
+  final m = hf ?? plain;
+  if (m != null) return 'https://${clean(m.group(1)!)}-${clean(m.group(2)!)}.hf.space';
+  if (s.startsWith('http')) return s.replaceAll(RegExp(r'/+$'), '');
+  return '';
+}
+
+Future<HttpClientResponse> _open(HttpClient c, String method, String url,
+    {String token = '', Object? body}) async {
+  final req = await c.openUrl(method, Uri.parse(url));
+  if (token.isNotEmpty) req.headers.set('Authorization', 'Bearer $token');
+  if (body != null) {
+    req.headers.contentType = ContentType.json;
+    req.add(utf8.encode(jsonEncode(body)));
+  }
+  return req.close();
+}
+
+Future<String> _readAll(HttpClientResponse r) => r.transform(utf8.decoder).join();
+String _short(String s) => s.length > 300 ? s.substring(0, 300) : s;
+
+String _pname(Map p) => '${p['parameter_name'] ?? p['label'] ?? ''}'.toLowerCase();
+
+String _ptype(Map p) {
+  final t = p['type'];
+  final raw = t is Map ? t['type'] : t;
+  return '${raw ?? ''}'.toLowerCase();
+}
+
+Future<Map<String, dynamic>?> _gradioInfo(
+    HttpClient c, String base, String token, void Function(String) say) async {
+  for (var attempt = 0; attempt < 8; attempt++) {
+    for (final prefix in const ['/gradio_api', '']) {
+      try {
+        final r = await _open(c, 'GET', '$base$prefix/info', token: token);
+        final text = await _readAll(r);
+        if (r.statusCode == 200) {
+          final j = jsonDecode(text);
+          if (j is Map && j['named_endpoints'] is Map) {
+            return {'prefix': prefix, 'info': j};
+          }
+        }
+      } catch (_) {}
+    }
+    say('Waking up the Space... (${attempt + 1}/8)');
+    await Future.delayed(const Duration(seconds: 10));
+  }
+  return null;
+}
+
+String? pickEndpoint(Map named, String override) {
+  if (override.trim().isNotEmpty) {
+    final k = override.trim().startsWith('/') ? override.trim() : '/${override.trim()}';
+    return named.containsKey(k) ? k : null;
+  }
+  String? best;
+  var bestScore = -999;
+  named.forEach((k, v) {
+    final returns = (v is Map && v['returns'] is List) ? v['returns'] as List : const [];
+    final hasVideo = returns.any((r) => r is Map && '${r['component']}'.toLowerCase().contains('video'));
+    if (!hasVideo) return;
+    final n = '$k'.toLowerCase();
+    var score = 0;
+    if (n.contains('text') || n.contains('t2v')) score += 3;
+    if (n.contains('image') || n.contains('i2v') || n.contains('v2v') || n.contains('video_to') || n.contains('video-to')) {
+      score -= 3;
+    }
+    if (score > bestScore) {
+      best = '$k';
+      bestScore = score;
+    }
+  });
+  return best;
+}
+
+String describeEndpoints(Map named) {
+  final b = StringBuffer();
+  named.forEach((k, v) {
+    final returns = (v is Map && v['returns'] is List) ? v['returns'] as List : const [];
+    final kinds = returns.map((r) => r is Map ? '${r['component']}' : '?').join(', ');
+    b.writeln('$k  ->  $kinds');
+  });
+  return b.toString().trim();
+}
+
+List<dynamic> buildGradioInputs(List params, String prompt, double seconds, bool portrait) {
+  int? promptIdx;
+  for (var i = 0; i < params.length; i++) {
+    final p = params[i];
+    if (p is Map && promptIdx == null) {
+      final n = _pname(p);
+      if (n.contains('prompt') && !n.contains('negative')) promptIdx = i;
+    }
+  }
+  if (promptIdx == null) {
+    for (var i = 0; i < params.length; i++) {
+      final p = params[i];
+      if (p is Map && !_pname(p).contains('negative') && _ptype(p) == 'string') {
+        promptIdx = i;
+        break;
+      }
+    }
+  }
+  final data = <dynamic>[];
+  int? wi;
+  int? hi;
+  for (var i = 0; i < params.length; i++) {
+    final raw = params[i];
+    final Map map = raw is Map ? raw : <String, dynamic>{};
+    final name = _pname(map);
+    final type = _ptype(map);
+    final hasDef = map['parameter_has_default'] == true;
+    dynamic value = hasDef ? map['parameter_default'] : null;
+    if (!hasDef) {
+      if (type == 'string') {
+        value = '';
+      } else if (type == 'number' || type == 'integer') {
+        value = 0;
+      } else if (type == 'boolean') {
+        value = false;
+      }
+    }
+    if (i == promptIdx) {
+      value = prompt;
+    } else if (name.contains('duration') && (type == 'number' || type == 'integer')) {
+      var sec = seconds;
+      final t = map['type'];
+      final desc = t is Map ? '${t['description'] ?? ''}' : '';
+      final m = RegExp(r'between\s+(-?[\d.]+)\s+and\s+(-?[\d.]+)').firstMatch(desc);
+      if (m != null) {
+        final lo = double.tryParse(m.group(1)!) ?? sec;
+        final up = double.tryParse(m.group(2)!) ?? sec;
+        sec = math.max(lo, math.min(up, sec));
+      }
+      value = type == 'integer' ? sec.round() : sec;
+    } else if (type == 'number' || type == 'integer') {
+      if (name.contains('width')) wi = i;
+      if (name.contains('height')) hi = i;
+    }
+    data.add(value);
+  }
+  if (portrait && wi != null && hi != null) {
+    final w = data[wi];
+    final h = data[hi];
+    if (w is num && h is num && w > h) {
+      data[wi] = h;
+      data[hi] = w;
+    }
+  }
+  return data;
+}
+
+bool _isVideoRef(String s) => RegExp(r'\.(mp4|webm|mov)(\?.*)?$', caseSensitive: false).hasMatch(s);
+
+String? _findVideoRef(dynamic v) {
+  if (v is Map) {
+    final url = v['url'];
+    final path = v['path'];
+    if (url is String && _isVideoRef(url)) return url;
+    if (path is String && _isVideoRef(path)) return path;
+    for (final x in v.values) {
+      final r = _findVideoRef(x);
+      if (r != null) return r;
+    }
+  } else if (v is List) {
+    for (final x in v) {
+      final r = _findVideoRef(x);
+      if (r != null) return r;
+    }
+  } else if (v is String && _isVideoRef(v)) {
+    return v;
+  }
+  return null;
+}
+
+Future<String> describeSpace(String spaceInput, String token, void Function(String) say) async {
+  final base = spaceBaseUrl(spaceInput);
+  if (base.isEmpty) return 'Enter the Space as owner/name (for example Lightricks/ltx-video-distilled) or paste its link.';
+  final client = HttpClient()..connectionTimeout = const Duration(seconds: 30);
+  try {
+    final got = await _gradioInfo(client, base, token, say);
+    if (got == null) {
+      return 'Could not reach $base\nThe Space may be sleeping, paused, private, or the name may be wrong. Open it once in a browser, then test again.';
+    }
+    final named = (got['info'] as Map)['named_endpoints'] as Map;
+    final pick = pickEndpoint(named, '');
+    return 'Connected to $base\nVideo endpoint chosen: ${pick ?? 'none found'}\n\nAll endpoints:\n${describeEndpoints(named)}';
+  } catch (e) {
+    return 'Connection test failed: $e';
+  } finally {
+    client.close(force: true);
+  }
+}
+
+/// Sends the prompt to a Gradio Space, waits for the generated clip and downloads it.
+Future<GenResult> generateClip({
+  required String spaceInput,
+  required String prompt,
+  required void Function(String) say,
+  String token = '',
+  String endpointOverride = '',
+  double seconds = 3,
+  bool portrait = true,
+}) async {
+  final base = spaceBaseUrl(spaceInput);
+  if (base.isEmpty) {
+    return GenResult(error: 'Enter the Space as owner/name (for example Lightricks/ltx-video-distilled) or paste its link.');
+  }
+  if (prompt.trim().isEmpty) return GenResult(error: 'The scene prompt is empty.');
+  final client = HttpClient()..connectionTimeout = const Duration(seconds: 30);
+  try {
+    say('Connecting to the Space...');
+    final got = await _gradioInfo(client, base, token, say);
+    if (got == null) {
+      return GenResult(error: 'Could not reach the Space. It may be sleeping, paused, private, or the name is wrong. Open it once in a browser, then try again.');
+    }
+    final prefix = got['prefix'] as String;
+    final named = (got['info'] as Map)['named_endpoints'] as Map;
+    final ep = pickEndpoint(named, endpointOverride);
+    if (ep == null) {
+      return GenResult(error: 'No video-generating endpoint was found. Available endpoints:\n${describeEndpoints(named)}');
+    }
+    final epInfo = named[ep];
+    final params = (epInfo is Map && epInfo['parameters'] is List) ? epInfo['parameters'] as List : const [];
+    final data = buildGradioInputs(params, prompt, seconds, portrait);
+    final name = ep.startsWith('/') ? ep.substring(1) : ep;
+
+    say('Sending your prompt...');
+    final post = await _open(client, 'POST', '$base$prefix/call/$name', token: token, body: {'data': data});
+    final postText = await _readAll(post);
+    if (post.statusCode != 200) {
+      return GenResult(error: 'The Space refused the request (HTTP ${post.statusCode}). ${_short(postText)}');
+    }
+    final eventId = (jsonDecode(postText) as Map)['event_id'];
+    if (eventId == null) return GenResult(error: 'The Space did not return a job id.');
+
+    say('Waiting in the queue and generating (usually 1–3 minutes)...');
+    final sse = await _open(client, 'GET', '$base$prefix/call/$name/$eventId', token: token);
+    if (sse.statusCode != 200) {
+      return GenResult(error: 'Could not read the result (HTTP ${sse.statusCode}).');
+    }
+    var event = '';
+    dynamic result;
+    String? errorText;
+    final lines = sse.transform(utf8.decoder).transform(const LineSplitter()).timeout(const Duration(minutes: 8));
+    await for (final line in lines) {
+      if (line.startsWith('event:')) {
+        event = line.substring(6).trim();
+        if (event == 'heartbeat' || event == 'generating') say('Generating on the Space GPU...');
+      } else if (line.startsWith('data:')) {
+        final d = line.substring(5).trim();
+        if (event == 'complete') {
+          result = jsonDecode(d);
+          break;
+        }
+        if (event == 'error') {
+          errorText = d;
+          break;
+        }
+      }
+    }
+    if (errorText != null) {
+      return GenResult(
+          error: 'The Space reported an error: ${_short(errorText)}\n'
+              'Common reasons: the free GPU quota is used up (add a free Hugging Face token or try later), the Space is busy, or the prompt was rejected.');
+    }
+    if (result == null) return GenResult(error: 'The Space finished without returning a video.');
+
+    var ref = _findVideoRef(result);
+    if (ref == null) {
+      return GenResult(error: 'The Space answered but no video file was found in its reply: ${_short('$result')}');
+    }
+    if (!ref.startsWith('http')) ref = '$base$prefix/file=$ref';
+
+    say('Downloading the clip...');
+    final dl = await _open(client, 'GET', ref, token: token);
+    if (dl.statusCode != 200) return GenResult(error: 'Could not download the clip (HTTP ${dl.statusCode}).');
+    final dir = await workDir('aiclips');
+    final out = File('${dir.path}/gen_${ts()}.mp4');
+    await dl.pipe(out.openWrite());
+    if (!out.existsSync() || out.lengthSync() < 5000) {
+      return GenResult(error: 'The downloaded clip was empty or incomplete.');
+    }
+    return GenResult(path: out.path);
+  } on TimeoutException {
+    return GenResult(error: 'The Space took too long to answer. Try again later.');
+  } catch (e) {
+    return GenResult(error: 'Generation failed: $e');
+  } finally {
+    client.close(force: true);
+  }
+}
+
 class ExportResult {
   ExportResult({this.path, this.error});
   final String? path;
@@ -482,7 +802,7 @@ Future<ExportResult> runExport(void Function(double) onProgress) async {
     if (c.isImage) {
       args.addAll(['-loop', '1', '-framerate', '30', '-t', _f(c.length), '-i', c.path]);
     } else {
-      args.addAll(['-ss', _f(c.start), '-t', _f(c.length), '-i', c.path]);
+      args.addAll(['-ss', _f(c.start), '-t', _f(c.playLength), '-i', c.path]);
     }
   }
   var idx = n;
@@ -536,7 +856,10 @@ Future<ExportResult> runExport(void Function(double) onProgress) async {
       ? 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920'
       : 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black';
   for (var i = 0; i < n; i++) {
-    parts.add('[$i:v]$fit,setsar=1,fps=30,format=yuv420p[v$i]');
+    final hold = clips[i].hold > 0.05
+        ? ',tpad=stop_mode=clone:stop_duration=${_f(clips[i].hold)}'
+        : '';
+    parts.add('[$i:v]$fit,setsar=1,fps=30$hold,format=yuv420p[v$i]');
   }
 
   var cur = 'v0';
@@ -858,7 +1181,7 @@ class ScriptPage extends StatelessWidget {
           return [
             Panel(
               title: 'Write your script',
-              subtitle: 'Choose a language, type a topic, generate a starter script, then edit freely.',
+              subtitle: 'Choose a language, type a topic, then write or paste your script.',
               icon: Icons.edit_note,
               child: Column(children: [
                 const LangDropdown(),
@@ -869,20 +1192,6 @@ class ScriptPage extends StatelessWidget {
                   decoration: const InputDecoration(labelText: 'Video topic'),
                 ),
                 const SizedBox(height: 10),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton.icon(
-                    style: FilledButton.styleFrom(backgroundColor: gold, foregroundColor: navy),
-                    onPressed: () {
-                      app.script.text = generateScriptText();
-                      app.changed();
-                      toast(context, 'Starter script created in ${app.language}. Edit it as you wish.');
-                    },
-                    icon: const Icon(Icons.auto_awesome),
-                    label: const Text('Generate starter script'),
-                  ),
-                ),
-                const SizedBox(height: 10),
                 TextField(
                   controller: app.script,
                   minLines: 8,
@@ -891,7 +1200,7 @@ class ScriptPage extends StatelessWidget {
                   onChanged: (_) => app.changed(),
                   decoration: const InputDecoration(
                     labelText: 'Your script',
-                    hintText: 'Generate a script or write your own...',
+                    hintText: 'Write or paste your script here...',
                   ),
                 ),
                 const SizedBox(height: 6),
@@ -925,7 +1234,7 @@ class ScriptPage extends StatelessWidget {
                 ]),
                 const SizedBox(height: 8),
                 const Note(
-                    'Starter scripts are offline templates, not a language model. For Dari and Pashto, review the wording before publishing.'),
+                    'Review Dari and Pashto wording carefully before publishing.'),
               ]),
             ),
           ];
@@ -2175,6 +2484,82 @@ class _AiVideoPageState extends State<AiVideoPage> {
   bool useAiVoice = true;
   String stage = '';
 
+  int? genIndex;
+  bool testing = false;
+  String genStatus = '';
+  String genNote = '';
+  double genSeconds = 3;
+  bool genPortrait = true;
+  bool get genBusy => genIndex != null || testing;
+
+  Future<bool> _generateScene(int i) async {
+    final s = app.scenes[i];
+    setState(() {
+      genIndex = i;
+      genStatus = 'Starting...';
+      genNote = '';
+    });
+    final r = await generateClip(
+      spaceInput: app.genSpace.text,
+      prompt: s.prompt,
+      token: app.genToken.text.trim(),
+      endpointOverride: app.genEndpoint.text.trim(),
+      seconds: genSeconds,
+      portrait: genPortrait,
+      say: (m) {
+        if (mounted) setState(() => genStatus = m);
+      },
+    );
+    if (!mounted) return false;
+    if (r.path == null) {
+      setState(() {
+        genIndex = null;
+        genStatus = '';
+        genNote = r.error ?? 'Unknown error.';
+      });
+      return false;
+    }
+    final d = await probeDuration(r.path!);
+    final th = await makeThumb(r.path!);
+    s.videoPath = r.path;
+    s.videoDuration = d;
+    s.thumb = th;
+    app.changed();
+    if (mounted) {
+      setState(() {
+        genIndex = null;
+        genStatus = '';
+        genNote = d > 0.5 ? '' : 'The clip was downloaded but could not be read (length 0).';
+      });
+    }
+    return d > 0.5;
+  }
+
+  Future<void> _generateAll() async {
+    for (var i = 0; i < app.scenes.length; i++) {
+      if (app.scenes[i].videoPath != null) continue;
+      final ok = await _generateScene(i);
+      if (!ok || !mounted) break;
+    }
+  }
+
+  Future<void> _testSpace() async {
+    setState(() {
+      testing = true;
+      genNote = '';
+      genStatus = 'Testing the connection...';
+    });
+    final text = await describeSpace(app.genSpace.text, app.genToken.text.trim(), (m) {
+      if (mounted) setState(() => genStatus = m);
+    });
+    if (!mounted) return;
+    setState(() {
+      testing = false;
+      genStatus = '';
+      genNote = text;
+    });
+  }
+
   void _draft() {
     final parts = splitText(currentScript());
     if (parts.isEmpty) return;
@@ -2239,14 +2624,22 @@ class _AiVideoPageState extends State<AiVideoPage> {
           lens.add(math.max(3.0, s.text.length * 0.07));
         }
       }
-      setState(() => stage = 'Drawing scene cards...');
+      setState(() => stage = 'Preparing scenes...');
       final dir = await workDir('scenes');
       app.clips.clear();
       app.layers.clear();
       for (var i = 0; i < n; i++) {
-        final out = '${dir.path}/scene_${ts()}_$i.png';
-        await renderSceneCard(app.scenes[i], out);
-        app.clips.add(MediaClip(path: out, isImage: true, source: 0, thumb: out, to: lens[i]));
+        final sc = app.scenes[i];
+        if (sc.videoPath != null && File(sc.videoPath!).existsSync() && sc.videoDuration > 0.8) {
+          final playLen = math.min(sc.videoDuration, lens[i]);
+          final c = MediaClip(path: sc.videoPath!, isImage: false, source: sc.videoDuration, thumb: sc.thumb, to: playLen);
+          c.hold = math.max(0.0, lens[i] - playLen);
+          app.clips.add(c);
+        } else {
+          final out = '${dir.path}/scene_${ts()}_$i.png';
+          await renderSceneCard(sc, out);
+          app.clips.add(MediaClip(path: out, isImage: true, source: 0, thumb: out, to: lens[i]));
+        }
       }
       app.transition = 'fade';
       app.transitionLen = td;
@@ -2257,7 +2650,10 @@ class _AiVideoPageState extends State<AiVideoPage> {
       var captionStart = 0.0;
       for (var i = 0; i < n; i++) {
         final captionEnd = captionStart + lens[i];
-        app.captions.add(Caption(captionStart, captionEnd, app.scenes[i].text));
+        // Scenes drawn as cards already show their text; captions are added for AI-clip scenes.
+        if (app.scenes[i].videoPath != null) {
+          app.captions.add(Caption(captionStart, captionEnd, app.scenes[i].text));
+        }
         captionStart = captionEnd - (i < n - 1 ? td : 0.0);
       }
       app.burnCaptions = true;
@@ -2304,18 +2700,18 @@ class _AiVideoPageState extends State<AiVideoPage> {
               ),
             ]),
             SizedBox(height: 4),
-            Note('Splits your script into scenes, creates visual cards or uses your selected pictures, adds phone-generated narration, creates timed captions, and exports an MP4. This is automated editing, not AI-generated moving footage.'),
+            Note('Splits your script into scenes, creates visual cards or uses your selected pictures, adds phone-generated narration, creates timed captions, and exports an MP4. Without AI clips this is automated editing, not AI-generated footage.'),
             SizedBox(height: 10),
             Row(children: [
-              Icon(Icons.block, color: Colors.orangeAccent, size: 18),
+              Icon(Icons.cloud, color: Colors.orangeAccent, size: 18),
               SizedBox(width: 8),
               Expanded(
-                child: Text('GENERATIVE AI FOOTAGE (not included)',
+                child: Text('GENERATIVE AI FOOTAGE (online, optional)',
                     style: TextStyle(color: Colors.orangeAccent, fontWeight: FontWeight.bold)),
               ),
             ]),
             SizedBox(height: 4),
-            Note('Brand-new moving footage from a prompt requires an external AI video service or a large local model. No paid service is called by this build. Scene prompts can be copied into a provider manually, then its clips imported into Video Editor.'),
+            Note('Real AI-generated clips need a GPU, so they are made online by an open-source model (LTX-Video) on a free Hugging Face Space — not on your phone. Use the AI clips panel below. Free GPU quota is limited and queues can be slow.'),
           ]),
         ),
         const SizedBox(height: 14),
@@ -2337,6 +2733,84 @@ class _AiVideoPageState extends State<AiVideoPage> {
             ),
           ]),
         ),
+        if (app.scenes.isNotEmpty)
+          Panel(
+            title: 'AI clips (generative, online)',
+            subtitle: 'Open-source LTX-Video on a free Hugging Face Space turns each scene prompt into a short moving clip.',
+            icon: Icons.movie_filter,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              TextField(
+                controller: app.genSpace,
+                decoration: const InputDecoration(labelText: 'Space (owner/name or link)'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: app.genToken,
+                obscureText: true,
+                decoration: const InputDecoration(
+                    labelText: 'Hugging Face token (optional)',
+                    helperText: 'Gives a larger free GPU quota. Kept in memory only, never saved.'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: app.genEndpoint,
+                decoration: const InputDecoration(labelText: 'Endpoint name (optional, advanced)'),
+              ),
+              Row(children: [
+                const Text('Clip length'),
+                Expanded(
+                  child: Slider(
+                    value: genSeconds,
+                    min: 2,
+                    max: 6,
+                    divisions: 8,
+                    onChanged: (v) => setState(() => genSeconds = v),
+                  ),
+                ),
+                Text('${genSeconds.toStringAsFixed(1)} s'),
+              ]),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Portrait (9:16) when the Space allows'),
+                value: genPortrait,
+                onChanged: (v) => setState(() => genPortrait = v),
+              ),
+              Wrap(spacing: 8, runSpacing: 8, children: [
+                OutlinedButton.icon(
+                  onPressed: genBusy ? null : _testSpace,
+                  icon: const Icon(Icons.wifi_tethering),
+                  label: const Text('Test connection'),
+                ),
+                FilledButton.icon(
+                  style: FilledButton.styleFrom(backgroundColor: gold, foregroundColor: navy),
+                  onPressed: genBusy || busy ? null : _generateAll,
+                  icon: const Icon(Icons.auto_awesome),
+                  label: const Text('Generate all AI clips'),
+                ),
+              ]),
+              if (genStatus.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                const LinearProgressIndicator(),
+                const SizedBox(height: 4),
+                Note(genStatus),
+              ],
+              if (genNote.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                SelectableText(genNote, style: const TextStyle(color: Colors.orangeAccent, fontSize: 12.5)),
+                TextButton.icon(
+                  onPressed: () async {
+                    await Clipboard.setData(ClipboardData(text: genNote));
+                    if (mounted) toast(context, 'Copied.');
+                  },
+                  icon: const Icon(Icons.copy, size: 16),
+                  label: const Text('Copy message'),
+                ),
+              ],
+              const SizedBox(height: 8),
+              const Note(
+                  'Your prompts are sent to a community Space hosted by Hugging Face, so avoid private text. Clips are short (a few seconds), take 1–3 minutes each, and may fail when the free quota is used up or the Space is busy or changed. Scenes without an AI clip still use designed cards.'),
+            ]),
+          ),
         for (var i = 0; i < app.scenes.length; i++) _sceneCard(i, app.scenes[i]),
         if (app.scenes.isNotEmpty)
           Panel(
@@ -2442,27 +2916,48 @@ class _AiVideoPageState extends State<AiVideoPage> {
               ),
           ]),
           const SizedBox(height: 6),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(color: navy, borderRadius: BorderRadius.circular(8)),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Note('Prompt for an external generative tool (optional):'),
-              const SizedBox(height: 4),
-              Text(s.prompt, style: const TextStyle(fontSize: 12.5, color: Colors.white70)),
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton.icon(
-                  onPressed: () async {
-                    await Clipboard.setData(ClipboardData(text: s.prompt));
-                    if (mounted) toast(context, 'Prompt copied.');
-                  },
-                  icon: const Icon(Icons.copy, size: 16),
-                  label: const Text('Copy prompt'),
-                ),
-              ),
-            ]),
+          TextFormField(
+            initialValue: s.prompt,
+            minLines: 2,
+            maxLines: 5,
+            decoration: const InputDecoration(labelText: 'Visual prompt (English works best)'),
+            onChanged: (v) => s.prompt = v,
           ),
+          const SizedBox(height: 8),
+          if (genIndex == i) ...[
+            const LinearProgressIndicator(),
+            const SizedBox(height: 4),
+            Note(genStatus),
+          ] else
+            Wrap(spacing: 8, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
+              FilledButton.icon(
+                onPressed: genBusy || busy ? null : () => _generateScene(i),
+                icon: const Icon(Icons.movie_filter, size: 18),
+                label: Text(s.videoPath == null ? 'Generate AI clip' : 'Regenerate'),
+              ),
+              TextButton.icon(
+                onPressed: () async {
+                  await Clipboard.setData(ClipboardData(text: s.prompt));
+                  if (mounted) toast(context, 'Prompt copied.');
+                },
+                icon: const Icon(Icons.copy, size: 16),
+                label: const Text('Copy prompt'),
+              ),
+              if (s.videoPath != null) ...[
+                const Icon(Icons.check_circle, color: teal, size: 18),
+                Text('AI clip ready (${s.videoDuration.toStringAsFixed(1)} s)',
+                    style: const TextStyle(color: teal, fontSize: 12.5)),
+                TextButton(
+                  onPressed: () {
+                    s.videoPath = null;
+                    s.videoDuration = 0;
+                    s.thumb = null;
+                    app.changed();
+                  },
+                  child: const Text('Remove'),
+                ),
+              ],
+            ]),
         ]),
       ),
     );
